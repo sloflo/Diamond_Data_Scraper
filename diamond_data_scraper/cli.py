@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging verbosity (default: INFO).",
     )
+    parser.add_argument(
+        "--league",
+        choices=["AL", "NL", "BOTH"],
+        default=None,
+        help="Which league to scrape: AL, NL, or BOTH. If omitted and prompting is enabled, you'll be asked.",
+    )
     return parser
 
 
@@ -61,6 +67,31 @@ def parse_limit_with_optional_prompt(*, limit: Optional[int], prompt: bool) -> O
         return None
 
 
+def parse_league_with_optional_prompt(*, league: Optional[str], prompt: bool) -> str:
+    """
+    Returns one of: 'AL', 'NL', 'BOTH'
+    """
+    if league is not None:
+        return league
+
+    if not prompt:
+        return "BOTH"
+
+    try:
+        raw = input("Which league to scrape? [AL/NL/BOTH] (press Enter for BOTH): ").strip().upper()
+    except EOFError:
+        return "BOTH"
+
+    if raw in {"", "BOTH", "B"}:
+        return "BOTH"
+    if raw in {"AL", "A"}:
+        return "AL"
+    if raw in {"NL", "N"}:
+        return "NL"
+
+    return "BOTH"
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -71,8 +102,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     limit = parse_limit_with_optional_prompt(limit=args.limit, prompt=not args.no_prompt)
+    league = parse_league_with_optional_prompt(league=args.league, prompt=not args.no_prompt)
 
     scraper = Scraper(headless=args.headless, profile_dir=args.profile_dir)
-    scraper.scrape(menu_url=YEAR_MENU_URL, limit_years=limit, out_dir=args.out_dir)
+    scraper.scrape(menu_url=YEAR_MENU_URL, limit_years=limit, out_dir=args.out_dir, league=league)
     return 0
 

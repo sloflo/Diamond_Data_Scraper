@@ -66,6 +66,7 @@ class Scraper:
         menu_url: str,
         limit_years: Optional[int] = None,
         out_dir: str = ".",
+        league: str = "BOTH",
     ) -> None:
         """
         Orchestrate the end-to-end scrape and write CSV outputs.
@@ -73,10 +74,11 @@ class Scraper:
         - **menu_url**: Year-menu URL to start from.
         - **limit_years**: If provided, only scrape the first N yearly links.
         - **out_dir**: Directory where CSVs are written.
+        - **league**: Which league to scrape: 'AL', 'NL', or 'BOTH' (default).
         """
         try:
             self.logger.info("Scrape started")
-            links = self.get_year_links(menu_url)
+            links = self.get_year_links(menu_url, league=league)
 
             if limit_years is not None:
                 if limit_years <= 0:
@@ -109,13 +111,18 @@ class Scraper:
         self.logger.info("Scrape finished successfully")
 
     # ---------- Navigation ----------
-    def get_year_links(self, menu_url: str) -> List[str]:
+    def get_year_links(self, menu_url: str, *, league: str = "BOTH") -> List[str]:
         """
         Load the year-menu page and return yearly AL/NL links.
 
         Filter:
         - keep all National League years
         - keep American League only for years >= 1901
+
+        league:
+        - 'AL': only American League
+        - 'NL': only National League
+        - 'BOTH': both leagues
         """
         self.logger.info("Loading year menu: %s", menu_url)
         self.driver.get(menu_url)
@@ -124,6 +131,12 @@ class Scraper:
             By.CSS_SELECTOR,
             "table.ba-sub > tbody > tr > td.datacolBox > a",
         )
+
+        want: Optional[str] = None
+        if league == "AL":
+            want = "a"
+        elif league == "NL":
+            want = "n"
 
         links: List[str] = []
         for a in anchors:
@@ -134,6 +147,9 @@ class Scraper:
 
             year = int(m.group("year"))
             league_code = m.group("league_code")
+
+            if want is not None and league_code != want:
+                continue
 
             if league_code == "a" and year < 1901:
                 continue
@@ -420,9 +436,71 @@ class Scraper:
                 for items in data.get("Pitching Statistics", []):
                     self.add_to_table(pitch_table, items, year, league)
                 for items in data.get("Standings", []):
-                    self.add_to_table(standing_table, items, year, league)
+                    self.add_to_table(standing_table, self.normalize_standings_row(items), year, league)
 
-        return pd.DataFrame(hit_table), pd.DataFrame(pitch_table), pd.DataFrame(standing_table)
+        standing_df = pd.DataFrame(standing_table)
+        standing_df = self.reorder_standing_columns(standing_df)
+
+        return pd.DataFrame(hit_table), pd.DataFrame(pitch_table), standing_df
+
+    def normalize_standings_row(self, items: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize known Baseball Almanac standings header variants to a canonical schema.
+
+        Some years use headers like:
+          - "Team [Click for roster]" instead of "Team | Roster"
+          - "Wins"/"Losses" instead of "W"/"L"
+
+        We normalize to:
+          Team, Roster, W, L, WP, GB, ...
+        """
+        if not items:
+            return items
+
+        out = dict(items)
+
+        # Team header variants
+        if "Team [Click for roster]" in out and "Team" not in out:
+            out["Team"] = out.pop("Team [Click for roster]")
+
+        # Older layouts sometimes use a combined "Team | Roster" header.
+        # We treat this as "Team" and add an empty "Roster" column to keep schema consistent.
+        if "Team | Roster" in out:
+            value = out.pop("Team | Roster")
+            # Only overwrite Team if it doesn't already exist.
+            out.setdefault("Team", value)
+            out.setdefault("Roster", "")
+
+        # W/L header variants
+        if "Wins" in out and "W" not in out:
+            out["W"] = out.pop("Wins")
+        if "Losses" in out and "L" not in out:
+            out["L"] = out.pop("Losses")
+
+        return out
+
+    def reorder_standing_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Enforce a consistent column order for standings and drop unused variants.
+
+        Target order (when present):
+          Team, W, L, WP, GB, T, Year, League
+        Any additional columns are appended after this sequence.
+        The "Roster" column is dropped (it's empty after normalization).
+        """
+        if df.empty:
+            return df
+
+        desired_order = ["Team", "W", "L", "WP", "GB", "T", "Year", "League"]
+
+        # Drop Roster if it exists; the user doesn't want it in the output.
+        if "Roster" in df.columns:
+            df = df.drop(columns=["Roster"])
+
+        ordered_cols = [c for c in desired_order if c in df.columns]
+        remaining_cols = [c for c in df.columns if c not in ordered_cols]
+
+        return df[ordered_cols + remaining_cols]
 
     def add_to_table(self, table: List[Dict[str, Any]], items: Dict[str, Any], year: int, league: str) -> None:
         """Append a single stats row into an output table, adding Year/League context columns."""
